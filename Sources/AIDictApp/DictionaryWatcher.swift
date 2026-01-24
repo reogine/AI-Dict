@@ -7,7 +7,8 @@ class DictionaryWatcher {
     private var observers: [pid_t: AXObserver] = [:]
     
     // Callback now includes the frame of the native window
-    var onDictionaryOpened: ((String, NSRect) -> Void)?
+    // Callback now just fires with the Window Rect (Immediate)
+    var onNativeWindowDetected: ((NSRect) -> Void)?
     
     func start() {
         print("DEBUG: Starting Dictionary Watcher (Overlay Strategy)...")
@@ -76,12 +77,10 @@ class DictionaryWatcher {
                 attempts += 1
             }
             
-            // Trigger our AI window
-            if let word = AccessibilityService.shared.getWordAtCursor() {
-                print("DEBUG: [COMPANION MODE] Native Rect found: \(rect)")
-                DispatchQueue.main.async {
-                    self.onDictionaryOpened?(word, rect)
-                }
+            // FIRE IMMEDIATELY: Don't wait for text!
+            print("DEBUG: [COMPANION MODE] Native Rect found: \(rect)")
+            DispatchQueue.main.async {
+                self.onNativeWindowDetected?(rect)
             }
         }
     }

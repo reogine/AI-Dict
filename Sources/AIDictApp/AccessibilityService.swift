@@ -37,8 +37,6 @@ class AccessibilityService {
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
         
         if let roleString = role as? String {
-            // print("DEBUG: Checking Role: \(roleString) at depth \(depth)")
-            
             // 1. FAST PATH: Check strictly text roles
             let textRoles: [String] = [
                 kAXStaticTextRole as String,
@@ -59,12 +57,9 @@ class AccessibilityService {
             let containerRoles = ["AXWebArea", "AXScrollArea", "AXGroup", "AXLink"]
             if containerRoles.contains(roleString) {
                 var children: CFTypeRef?
-                // Limit child count iteration to avoid huge loops
                 let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
                 
                 if result == .success, let childrenArray = children as? [AXUIElement] {
-                    // Only check the first few children near the cursor to be fast? 
-                    // For now, simple recursion but depth-limited.
                     for child in childrenArray.prefix(10) { // Safety cap: only check top 10 children
                         if let found = extractText(from: child, depth: depth + 1) {
                             return found

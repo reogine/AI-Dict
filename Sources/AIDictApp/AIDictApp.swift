@@ -3,7 +3,8 @@ import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
-    var word: String = ""
+    // State
+    var word: String = "Scanning..."
     var definition: String? = nil
     var isLoading: Bool = false
     
@@ -21,7 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         
-        // LOCAL MONITOR: (If the app itself is focused)
+        // LOCAL MONITOR:
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
             if self.window.isVisible {
                 let clickLocation = event.locationInWindow
@@ -31,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
+        
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 350),
             styleMask: [.borderless, .fullSizeContentView],
@@ -42,65 +44,91 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.isMovableByWindowBackground = true
         window.backgroundColor = .clear
         window.hasShadow = true
-        // Allow window to appear over Full Screen apps
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
-        // host the SwiftUI view
+        // Initial View State
         let contentView = DefinitionView(word: .constant(self.word), definition: .constant(self.definition), isLoading: .constant(self.isLoading))
         window.contentView = NSHostingView(rootView: contentView)
         
-        // Set up Dictionary Hijacking (Overlay Strategy)
-        DictionaryWatcher.shared.onDictionaryOpened = { word, nativeRect in
-            print("DEBUG: Companion Triggered for word: \(word) with rect: \(nativeRect)")
+        // NEW: ASYNC SIGNAL
+        DictionaryWatcher.shared.onNativeWindowDetected = { nativeRect in
+            print("DEBUG: Window Detected! Showing UI immediately...")
             DispatchQueue.main.async {
-                self.showWindow(for: word, nativeRect: nativeRect)
+                self.showScanningWindow(nativeRect: nativeRect)
+                self.startAsyncScan()
             }
         }
         DictionaryWatcher.shared.start()
         
-        // Hide on launch
         window.orderOut(nil)
-        print("DEBUG: AI-Dict active in Companion Mode. Watching for native lookups...")
+        print("DEBUG: AI-Dict Async Companion Ready.")
     }
     
-    func showWindow(for word: String, nativeRect: NSRect) {
-        print("DEBUG: Showing companion window for word: \(word)")
-        self.word = word
-        self.fetchDefinition(for: word)
+    // STEP 1: Show the window INSTANTLY (Optimistic UI)
+    func showScanningWindow(nativeRect: NSRect) {
+        self.word = "Scanning..."
+        self.definition = nil
+        self.isLoading = true
         
-        // Update the view
+        // Refresh View
         let contentView = DefinitionView(word: .constant(self.word), definition: .constant(self.definition), isLoading: .constant(self.isLoading))
         window.contentView = NSHostingView(rootView: contentView)
         
-        // Calculate Position using Helper
+        // Calculate Position
         let mouseLocation = NSEvent.mouseLocation
         let newOrigin = WindowPositioner.calculatePosition(
             for: window.frame,
             nativeRect: nativeRect,
             mouseLocation: mouseLocation
         )
-        
-        print("DEBUG: AI Window Origin: \(newOrigin)")
-        
         window.setFrameOrigin(newOrigin)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     
+    // STEP 2: Fetch Text in Background
+    func startAsyncScan() {
+        Task {
+            // Artificial delay (optional debug) or just run extraction
+            // We use Task.detached or just standard Task to get off main thread
+            
+            // Note: AccessibilityService.shared.getWordAtCursor() might block slightly, 
+            // but we are already shown the window.
+            let foundWord = AccessibilityService.shared.getWordAtCursor()
+            
+            await MainActor.run {
+                if let realWord = foundWord {
+                    print("DEBUG: Async Scan Found: \(realWord)")
+                    self.word = realWord
+                    self.fetchDefinition(for: realWord)
+                } else {
+                    print("DEBUG: Async Scan Failed")
+                    self.word = "Text Not Found"
+                    self.isLoading = false
+                    self.updateView()
+                }
+            }
+        }
+    }
+    
     func fetchDefinition(for word: String) {
         self.isLoading = true
         self.definition = nil
+        self.updateView()
         
         Task {
             let result = await AIService.shared.getDefinition(for: word)
             await MainActor.run {
                 self.definition = result
                 self.isLoading = false
-                // Update the view again to reflect changes
-                let contentView = DefinitionView(word: .constant(self.word), definition: .constant(self.definition), isLoading: .constant(self.isLoading))
-                self.window.contentView = NSHostingView(rootView: contentView)
+                self.updateView()
             }
         }
+    }
+    
+    func updateView() {
+        let contentView = DefinitionView(word: .constant(self.word), definition: .constant(self.definition), isLoading: .constant(self.isLoading))
+        window.contentView = NSHostingView(rootView: contentView)
     }
 }
 
