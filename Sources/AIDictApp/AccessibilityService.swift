@@ -6,65 +6,109 @@ class AccessibilityService {
     static let shared = AccessibilityService()
     
     func getWordAtCursor() -> String? {
-        let mouseLocation = NSEvent.mouseLocation
-        // Get the screen where the mouse is
-        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) else {
-            return nil
-        }
+        // 1. Get Mouse Location using CoreGraphics (Native to Accessibility)
+        guard let event = CGEvent(source: nil) else { return nil }
+        let point = event.location
         
-        // AppKit uses bottom-left origin, Accessibility uses top-left origin.
-        let screenHeight = screen.frame.height
-        let screenOriginY = screen.frame.origin.y
-        let flippedY = screenHeight - (mouseLocation.y - screenOriginY)
-        
+        // 2. Hit Test (System Wide)
         let systemWide = AXUIElementCreateSystemWide()
         var element: AXUIElement?
+        var result = AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element)
         
-        let result = AXUIElementCopyElementAtPosition(systemWide, Float(mouseLocation.x), Float(flippedY), &element)
-        
-        guard result == .success, let element = element else {
-            return nil
+        // 3. PIERCE-THROUGH LOGIC: Check if blocked by LookupViewService or Self
+        if result == .success, let target = element {
+            var pid: pid_t = 0
+            AXUIElementGetPid(target, &pid)
+            
+            let app = NSRunningApplication(processIdentifier: pid)
+            let bundleID = app?.bundleIdentifier ?? ""
+            
+            if bundleID == "com.apple.LookupViewService" || bundleID == Bundle.main.bundleIdentifier {
+                // Find the actual user app (Frontmost)
+                if let frontApp = NSWorkspace.shared.frontmostApplication,
+                   frontApp.bundleIdentifier != "com.apple.LookupViewService" {
+                    
+                    let frontPid = frontApp.processIdentifier
+                    let frontElement = AXUIElementCreateApplication(frontPid)
+                    
+                    // Re-try hit test specifically against the front app
+                    var frontResultElement: AXUIElement?
+                    let pierceResult = AXUIElementCopyElementAtPosition(frontElement, Float(point.x), Float(point.y), &frontResultElement)
+                    
+                    if pierceResult == .success, let piercedTarget = frontResultElement {
+                        element = piercedTarget
+                    }
+                }
+            }
         }
         
-        return extractText(from: element)
+        guard let target = element else { return nil }
+        
+        // 4. Try Precision Extraction (AXRangeForPosition)
+        var rangeValue: CFTypeRef?
+        var pointValue = point
+        guard let axPoint = AXValueCreate(.cgPoint, &pointValue) else { return nil }
+        
+        let rangeResult = AXUIElementCopyParameterizedAttributeValue(target, kAXRangeForPositionParameterizedAttribute as CFString, axPoint, &rangeValue)
+        
+        if rangeResult == .success, let rangeVal = rangeValue {
+            var range = CFRange()
+            AXValueGetValue(rangeVal as! AXValue, .cfRange, &range)
+            
+            // If location is 0 but we have text, it's likely a BUG in the target app (VS Code/Electron often do this).
+            // We must fallback to "Brute Force Geometry" (Inverse Hit-Test).
+            if range.location == 0 {
+                // Get full text to check if it's actually just 1 word or a failure
+                var valueRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(target, kAXValueAttribute as CFString, &valueRef)
+                if let text = valueRef as? String, text.count > 5 { // Arbitrary threshold
+                    if let scannedWord = scanForWordUnderMouse(target, point: point, text: text) {
+                         return scannedWord
+                    }
+                }
+            }
+            
+            // Extract word from this specific range
+            return extractWordFromRange(target, range)
+        }
+        
+        // 5. Fallback: Standard extraction
+        return extractSelectedText(from: target)
     }
     
-    private func extractText(from element: AXUIElement, depth: Int = 0) -> String? {
-        // SAFETY LIMIT: Stop recursion if too deep to prevent lag
-        if depth > 2 { return nil }
+    // BRUTE FORCE: Split text into words, ask for their Rects, and see which one contains the mouse.
+    private func scanForWordUnderMouse(_ element: AXUIElement, point: CGPoint, text: String) -> String? {
+        let nsStr = text as NSString
+        var wordRanges: [NSRange] = []
         
-        var role: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        // 1. Tokenize (Simple split by whitespace/newlines for speed)
+        let scanner = Scanner(string: text)
+        while !scanner.isAtEnd {
+            let startLoc = scanner.scanLocation
+            if let word = scanner.scanUpToCharacters(from: .whitespacesAndNewlines) {
+                 let length = scanner.scanLocation - startLoc
+                 wordRanges.append(NSRange(location: startLoc, length: length))
+            }
+            // Skip whitespace
+            _ = scanner.scanCharacters(from: .whitespacesAndNewlines)
+        }
         
-        if let roleString = role as? String {
-            // 1. FAST PATH: Check strictly text roles
-            let textRoles: [String] = [
-                kAXStaticTextRole as String,
-                kAXTextAreaRole as String,
-                kAXTextFieldRole as String
-            ]
+        // 2. Check Geometry for each word
+        for range in wordRanges {
+            // Convert NSRange to CFRange
+            var cfRange = CFRange(location: range.location, length: range.length)
+            var rangeValue: AXValue? = AXValueCreate(.cfRange, &cfRange)
             
-            if textRoles.contains(roleString) {
-                return getElementValue(element)
-            }
+            var boundsValue: CFTypeRef?
+            let result = AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, rangeValue!, &boundsValue)
             
-            // 2. CHECK VALUE FIRST: Even if it's a container, it might have a value (e.g. selected text)
-            if let val = getElementValue(element) {
-                return val
-            }
-            
-            // 3. RECURSIVE CHECK: Only dig deeper if truly necessary
-            let containerRoles = ["AXWebArea", "AXScrollArea", "AXGroup", "AXLink"]
-            if containerRoles.contains(roleString) {
-                var children: CFTypeRef?
-                let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
+            if result == .success, let boundsVal = boundsValue {
+                var rect = CGRect.zero
+                AXValueGetValue(boundsVal as! AXValue, .cgRect, &rect)
                 
-                if result == .success, let childrenArray = children as? [AXUIElement] {
-                    for child in childrenArray.prefix(10) { // Safety cap: only check top 10 children
-                        if let found = extractText(from: child, depth: depth + 1) {
-                            return found
-                        }
-                    }
+                if rect.contains(point) {
+                    let word = nsStr.substring(with: range)
+                    return word
                 }
             }
         }
@@ -72,23 +116,56 @@ class AccessibilityService {
         return nil
     }
     
-    private func getElementValue(_ element: AXUIElement) -> String? {
-        // Prioritize "Selected Text" as it's most likely what the user clicked
+    // Helper to get text around a specific index range
+    private func extractWordFromRange(_ element: AXUIElement, _ range: CFRange) -> String? {
+        var valueRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
+        
+        guard let fullText = valueRef as? String else { return nil }
+        
+        let index = range.location
+        if index >= 0 && index < fullText.count {
+            let nsStr = fullText as NSString
+            let wordRange = nsStr.rangeOfWord(at: index)
+            if wordRange.location != NSNotFound {
+                return nsStr.substring(with: wordRange)
+            }
+        }
+        return nil
+    }
+    
+    // Fallback: Only get text if it is SELECTED.
+    private func extractSelectedText(from element: AXUIElement) -> String? {
         var selected: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selected) == .success,
            let text = selected as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        
-        // Then check value/content
-        let attributes = [kAXValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute]
-        for attr in attributes {
-            var value: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success,
-               let text = value as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return text.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
         return nil
+    }
+}
+
+// Extension to help word finding
+extension NSString {
+    func rangeOfWord(at index: Int) -> NSRange {
+        var start = index
+        while start > 0 {
+            let char = self.character(at: start - 1)
+            if !CharacterSet.alphanumerics.contains(UnicodeScalar(char)!) {
+                break
+            }
+            start -= 1
+        }
+        
+        var end = index
+        while end < self.length {
+            let char = self.character(at: end)
+            if !CharacterSet.alphanumerics.contains(UnicodeScalar(char)!) {
+                break
+            }
+            end += 1
+        }
+        
+        return NSRange(location: start, length: end - start)
     }
 }
