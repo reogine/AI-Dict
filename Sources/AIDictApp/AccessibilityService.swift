@@ -24,8 +24,24 @@ class AccessibilityService {
             let bundleID = app?.bundleIdentifier ?? ""
             
             if bundleID == "com.apple.LookupViewService" || bundleID == Bundle.main.bundleIdentifier {
-                // Find the actual user app (Frontmost)
-                if let frontApp = NSWorkspace.shared.frontmostApplication,
+                // FIX #1: Use menuBarOwningApplication instead of frontmostApplication
+                // In full screen mode, frontmostApplication can be the popup itself.
+                // menuBarOwningApplication returns the app that owns the menu bar (the real user app).
+                var targetApp: NSRunningApplication? = NSWorkspace.shared.menuBarOwningApplication
+                
+                // Fallback: If menuBarOwningApplication returns LookupViewService or nil, try frontmost
+                if targetApp?.bundleIdentifier == "com.apple.LookupViewService" || targetApp == nil {
+                    targetApp = NSWorkspace.shared.frontmostApplication
+                }
+                
+                // Final fallback: Grab any visible app that isn't LookupViewService or us
+                if targetApp?.bundleIdentifier == "com.apple.LookupViewService" || targetApp?.bundleIdentifier == Bundle.main.bundleIdentifier {
+                    targetApp = NSWorkspace.shared.runningApplications.first {
+                        $0.isActive && $0.bundleIdentifier != "com.apple.LookupViewService" && $0.bundleIdentifier != Bundle.main.bundleIdentifier
+                    }
+                }
+                
+                if let frontApp = targetApp,
                    frontApp.bundleIdentifier != "com.apple.LookupViewService" {
                     
                     let frontPid = frontApp.processIdentifier

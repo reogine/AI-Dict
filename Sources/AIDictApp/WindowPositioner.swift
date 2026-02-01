@@ -7,19 +7,24 @@ struct WindowPositioner {
         var xPos: CGFloat = 0
         var yPos: CGFloat = 0
         
-        // 1. FIND SCREEN
-        // Try to find the screen containing the mouse OR the native window
-        // Prioritize screen containing native window if valid
+        // 1. FIND SCREEN (FIX #2: Improved for Full Screen Spaces)
+        // Priority order: Screen containing nativeRect center → Screen containing mouse → Main screen
         var targetScreen: NSScreen?
         
-        if nativeRect.width > 0 {
-             // Basic check: center of native rect
-             let center = NSPoint(x: nativeRect.midX, y: nativeRect.midY)
-             targetScreen = NSScreen.screens.first { NSMouseInRect(center, $0.frame, false) }
+        if nativeRect.width > 0 && nativeRect.height > 0 {
+            // FIX #2: Convert nativeRect center from AX coordinates (top-left) to AppKit (bottom-left)
+            // to properly find the screen in full screen mode.
+            let mainScreenHeight = NSScreen.screens.first?.frame.height ?? 900
+            let appKitCenterY = mainScreenHeight - nativeRect.midY
+            let appKitCenter = NSPoint(x: nativeRect.midX, y: appKitCenterY)
+            
+            targetScreen = NSScreen.screens.first { screen in
+                screen.frame.contains(appKitCenter)
+            }
         }
         
         if targetScreen == nil {
-             targetScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
+            targetScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
         }
         
         guard let screen = targetScreen ?? NSScreen.main else {
@@ -33,22 +38,16 @@ struct WindowPositioner {
         if nativeRect.width > 0 && nativeRect.height > 0 {
             // NATIVE RELATIVE MODE
             
-            // AppKit Y Conversion (accessibility uses Top-Left, we need Bottom-Left)
-            // Note: The nativeRect passed from DictionaryWatcher should already be converted or we need to handle it.
-            // DictionaryWatcher passes raw AXValue which is Top-Left.
-            // Let's assume consistent conversion here:
-            let mainScreenHeight = NSScreen.screens.first?.frame.height ?? 900
-            // AX Y is distance from top. AppKit Y is distance from bottom.
-            // Check: if nativeRect comes from AX, y is top.
-            // nativeAppKitY (Bottom of window) = ScreenHeight - (AX_Y + Height)
-            // nativeAppKitTop = ScreenHeight - AX_Y
+            // FIX #3: Use the ACTUAL screen's height for conversion, not just the first screen
+            // This is critical for multi-monitor and full screen setups.
+            let referenceHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
             
-            // Wait, let's look at how we did it in AIDictApp.swift:
-            // let nativeAppKitY = mainScreenHeight - nativeRect.origin.y - nativeRect.height
-            // let nativeTop = nativeAppKitY + nativeRect.height
-            // yPos = nativeTop - windowFrame.height
-             
-            let nativeAppKitY = mainScreenHeight - nativeRect.origin.y - nativeRect.height
+            // AX coordinates: origin is top-left of primary screen
+            // AppKit coordinates: origin is bottom-left of primary screen
+            // nativeRect.origin.y = distance from TOP of primary screen
+            // We need: distance from BOTTOM of primary screen
+            
+            let nativeAppKitY = referenceHeight - nativeRect.origin.y - nativeRect.height
             let nativeTop = nativeAppKitY + nativeRect.height
             
             yPos = nativeTop - windowFrame.height
